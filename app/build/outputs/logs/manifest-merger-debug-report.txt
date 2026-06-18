@@ -1,9 +1,9 @@
 -- Merging decision tree log ---
 manifest
-ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:2:1-17:12
-INJECTED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:2:1-17:12
-INJECTED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:2:1-17:12
-INJECTED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:2:1-17:12
+ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:2:1-27:12
+INJECTED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:2:1-27:12
+INJECTED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:2:1-27:12
+INJECTED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:2:1-27:12
 MERGED from [androidx.compose.material3:material3-android:1.2.0] /home/paradoks/.gradle/caches/transforms-3/31af2b2af7621a0f8014b28fb9dc06b9/transformed/material3-release/AndroidManifest.xml:17:1-22:12
 MERGED from [androidx.activity:activity:1.8.2] /home/paradoks/.gradle/caches/transforms-3/ba12532002ff5700c838324281101227/transformed/activity-1.8.2/AndroidManifest.xml:17:1-22:12
 MERGED from [androidx.activity:activity-ktx:1.8.2] /home/paradoks/.gradle/caches/transforms-3/c99b79128b1be4fe6ff3bc5fc6cc8d9d/transformed/activity-ktx-1.8.2/AndroidManifest.xml:2:1-7:12
@@ -51,9 +51,17 @@ MERGED from [androidx.tracing:tracing:1.0.0] /home/paradoks/.gradle/caches/trans
 		INJECTED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml
 	xmlns:android
 		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:2:11-69
+uses-permission#android.permission.POST_NOTIFICATIONS
+ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:4:5-77
+	android:name
+		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:4:22-74
+uses-permission#android.permission.SCHEDULE_EXACT_ALARM
+ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:5:5-79
+	android:name
+		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:5:22-76
 application
-ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:3:5-16:19
-INJECTED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:3:5-16:19
+ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:7:5-26:19
+INJECTED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:7:5-26:19
 MERGED from [androidx.emoji2:emoji2:1.3.0] /home/paradoks/.gradle/caches/transforms-3/717f9dc071b78a0adec328cdd5ebdb1e/transformed/emoji2-1.3.0/AndroidManifest.xml:23:5-33:19
 MERGED from [androidx.emoji2:emoji2:1.3.0] /home/paradoks/.gradle/caches/transforms-3/717f9dc071b78a0adec328cdd5ebdb1e/transformed/emoji2-1.3.0/AndroidManifest.xml:23:5-33:19
 MERGED from [androidx.core:core:1.12.0] /home/paradoks/.gradle/caches/transforms-3/d1e4a685b1001794fbcfe4ee9c157a7e/transformed/core-1.12.0/AndroidManifest.xml:28:5-89
@@ -71,29 +79,35 @@ MERGED from [androidx.startup:startup-runtime:1.1.1] /home/paradoks/.gradle/cach
 	android:appComponentFactory
 		ADDED from [androidx.core:core:1.12.0] /home/paradoks/.gradle/caches/transforms-3/d1e4a685b1001794fbcfe4ee9c157a7e/transformed/core-1.12.0/AndroidManifest.xml:28:18-86
 	android:supportsRtl
-		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:6:9-35
+		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:10:9-35
 	android:label
-		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:5:9-38
+		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:9:9-38
 	android:allowBackup
-		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:4:9-35
+		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:8:9-35
 	android:theme
-		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:7:9-66
+		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:11:9-66
 activity#com.example.offlinediary.MainActivity
-ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:8:9-15:20
+ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:13:9-20:20
 	android:exported
-		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:10:13-36
+		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:15:13-36
 	android:name
-		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:9:13-41
+		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:14:13-41
 intent-filter#action:name:android.intent.action.MAIN+category:name:android.intent.category.LAUNCHER
-ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:11:13-14:29
+ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:16:13-19:29
 action#android.intent.action.MAIN
-ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:12:17-69
+ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:17:17-69
 	android:name
-		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:12:25-66
+		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:17:25-66
 category#android.intent.category.LAUNCHER
-ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:13:17-77
+ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:18:17-77
 	android:name
-		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:13:27-74
+		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:18:27-74
+receiver#com.example.offlinediary.NotificationReceiver
+ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:22:9-24:40
+	android:exported
+		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:24:13-37
+	android:name
+		ADDED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml:23:13-49
 uses-sdk
 INJECTED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml reason: use-sdk injection requested
 INJECTED from /home/paradoks/Desktop/OfflineDiary/app/src/main/AndroidManifest.xml

@@ -1,9 +1,11 @@
 package com.example.offlinediary
+
 import android.app.AlarmManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.TimePickerDialog
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -30,8 +32,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
@@ -40,8 +42,12 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.delay
@@ -53,22 +59,19 @@ import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import java.util.*
 import kotlin.random.Random
-import androidx.compose.ui.draw.drawBehind
 
-
-
-// --- МОДЕЛИ И СОХРАНЕНИЕ ---
+// --- МОДЕЛИ ---
 
 data class DiaryEvent(
     val id: String = UUID.randomUUID().toString(),
     val title: String,
     val date: String,
-    val type: Int, // 0 = Обычное, 1 = Перерыв (с концом), 2 = Пропуск (без времени, скрытое)
+    val type: Int, // 0 = Событие, 1 = Перерыв
     val startTime: String,
     val endTime: String,
     val colorArgb: Int,
-    val recurrenceType: Int, // 0 = 1 раз, 1 = Каждый день, 2 = Выбранные дни
-    val customDaysOfWeek: List<Int>, // 1..7 (Пн..Вс)
+    val recurrenceType: Int,
+    val customDaysOfWeek: List<Int>,
     val hasNotification: Boolean = false
 )
 
@@ -81,10 +84,25 @@ fun DiaryEvent.occursOn(pageDate: LocalDate): Boolean {
     }
 }
 
+fun DiaryEvent.isPast(pageDate: LocalDate): Boolean {
+    if (this.type == 1) {
+        val eParts = endTime.split(":")
+        if (eParts.size != 2) return false
+        val eDateTime = LocalDateTime.of(pageDate, LocalTime.of(eParts[0].toInt(), eParts[1].toInt()))
+        return LocalDateTime.now().isAfter(eDateTime)
+    } else {
+        val tParts = startTime.split(":")
+        if (tParts.size != 2) return false
+        val eDateTime = LocalDateTime.of(pageDate, LocalTime.of(tParts[0].toInt(), tParts[1].toInt()))
+        return LocalDateTime.now().isAfter(eDateTime)
+    }
+}
+
+// --- ХРАНИЛИЩЕ ---
+
 class DataManager(context: Context) {
     private val prefs = context.getSharedPreferences("DiaryPrefs", Context.MODE_PRIVATE)
     private val gson = Gson()
-
     fun saveEvents(events: List<DiaryEvent>) = prefs.edit().putString("events", gson.toJson(events)).apply()
     fun loadEvents(): List<DiaryEvent> {
         val json = prefs.getString("events", null) ?: return emptyList()
@@ -93,26 +111,108 @@ class DataManager(context: Context) {
     }
     fun isDarkTheme() = prefs.getBoolean("dark_theme", false)
     fun setDarkTheme(isDark: Boolean) = prefs.edit().putBoolean("dark_theme", isDark).apply()
-    fun getDefaultBlockColor() = prefs.getInt("default_color", Color(0xFFF0F0F0).toArgb())
+    fun getDefaultBlockColor() = prefs.getInt("default_color", Color(0xFFFFFFFF).toArgb())
     fun setDefaultBlockColor(color: Int) = prefs.edit().putInt("default_color", color).apply()
 }
 
-// --- ОСНОВНАЯ АКТИВНОСТЬ ---
+// --- УВЕДОМЛЕНИЯ ---
+
+const val CHANNEL_ID = "diary_reminders"
+
+class NotificationReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val title = intent.getStringExtra("title") ?: "Событие"
+        val eventId = intent.getStringExtra("eventId") ?: return
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("Напоминание")
+            .setContentText(title)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build()
+        try {
+            NotificationManagerCompat.from(context).notify(eventId.hashCode(), notification)
+        } catch (e: SecurityException) { }
+    }
+}
+
+fun createNotificationChannel(context: Context) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        val channel = NotificationChannel(CHANNEL_ID, "Напоминания", NotificationManager.IMPORTANCE_HIGH).apply {
+            description = "Уведомления о событиях"
+        }
+        context.getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+    }
+}
+
+fun scheduleNotification(context: Context, event: DiaryEvent) {
+    if (!event.hasNotification) return
+    try {
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !alarmManager.canScheduleExactAlarms()) return
+
+        val intent = Intent(context, NotificationReceiver::class.java).apply {
+            putExtra("title", event.title)
+            putExtra("eventId", event.id)
+        }
+        val pendingIntent = PendingIntent.getBroadcast(context, event.id.hashCode(), intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+
+        val tParts = event.startTime.split(":")
+        if (tParts.size != 2) return
+        val eventDateTime = LocalDateTime.of(LocalDate.parse(event.date), LocalTime.of(tParts[0].toInt(), tParts[1].toInt()))
+        val millis = eventDateTime.minusMinutes(5).atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+
+        if (millis > System.currentTimeMillis())
+            alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, pendingIntent)
+    } catch (e: SecurityException) { }
+}
+
+fun cancelNotification(context: Context, event: DiaryEvent) {
+    val intent = Intent(context, NotificationReceiver::class.java)
+    val pendingIntent = PendingIntent.getBroadcast(context, event.id.hashCode(), intent,
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    (context.getSystemService(Context.ALARM_SERVICE) as AlarmManager).cancel(pendingIntent)
+}
+
+// --- АКТИВНОСТЬ ---
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        createNotificationChannel(this)
         val dataManager = DataManager(this)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001)
+            }
+        }
 
         setContent {
             var isDarkTheme by remember { mutableStateOf(dataManager.isDarkTheme()) }
             var defaultBlockColor by remember { mutableStateOf(Color(dataManager.getDefaultBlockColor())) }
-            
-            MaterialTheme(colorScheme = if (isDarkTheme) darkColorScheme() else lightColorScheme()) {
+
+            val colorScheme = if (isDarkTheme) darkColorScheme(
+                primary = Color(0xFF90CAF9),
+                secondary = Color(0xFFCE93D8),
+                background = Color(0xFF121212),
+                surface = Color(0xFF1E1E1E),
+                surfaceVariant = Color(0xFF2C2C2C),
+                onSurface = Color(0xFFE0E0E0),
+                onBackground = Color(0xFFE0E0E0)
+            ) else lightColorScheme(
+                primary = Color(0xFF1976D2),
+                secondary = Color(0xFF9C27B0),
+                background = Color(0xFFF8F9FA),
+                surface = Color(0xFFFFFFFF),
+                surfaceVariant = Color(0xFFF5F5F5),
+            )
+
+            MaterialTheme(colorScheme = colorScheme) {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    DiaryApp(
-                        dataManager = dataManager,
-                        isDarkTheme = isDarkTheme,
+                    DiaryApp(dataManager, isDarkTheme,
                         onThemeChange = { isDarkTheme = it; dataManager.setDarkTheme(it) },
                         defaultBlockColor = defaultBlockColor,
                         onDefaultColorChange = { defaultBlockColor = it; dataManager.setDefaultBlockColor(it.toArgb()) }
@@ -123,14 +223,18 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-
-// --- ГЛАВНЫЙ ИНТЕРФЕЙС ---
+// --- ГЛАВНЫЙ ЭКРАН ---
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
-fun DiaryApp(dataManager: DataManager, isDarkTheme: Boolean, onThemeChange: (Boolean) -> Unit, defaultBlockColor: Color, onDefaultColorChange: (Color) -> Unit) {
+fun DiaryApp(
+    dataManager: DataManager, isDarkTheme: Boolean,
+    onThemeChange: (Boolean) -> Unit, defaultBlockColor: Color,
+    onDefaultColorChange: (Color) -> Unit
+) {
+    val context = LocalContext.current
     val eventsList = remember { mutableStateListOf(*dataManager.loadEvents().toTypedArray()) }
-    fun saveAndSync() { dataManager.saveEvents(eventsList) }
+    fun saveAndSync() = dataManager.saveEvents(eventsList)
 
     var isMonthView by remember { mutableStateOf(false) }
     var isSettingsView by remember { mutableStateOf(false) }
@@ -146,86 +250,95 @@ fun DiaryApp(dataManager: DataManager, isDarkTheme: Boolean, onThemeChange: (Boo
 
     LaunchedEffect(selectedDate) {
         if (!isMonthView && !isSettingsView) {
-            val diff = ChronoUnit.DAYS.between(LocalDate.now(), selectedDate).toInt()
-            pagerState.scrollToPage(initialPage + diff)
+            pagerState.scrollToPage(initialPage + ChronoUnit.DAYS.between(LocalDate.now(), selectedDate).toInt())
         }
     }
 
     when {
         isSettingsView -> SettingsScreen(isDarkTheme, onThemeChange, defaultBlockColor, onDefaultColorChange) { isSettingsView = false }
-        isMonthView -> MonthCalendarView(selectedDate, eventsList, { selectedDate = it; isMonthView = false }, { isMonthView = false })
+        isMonthView -> MonthCalendarView(selectedDate, eventsList,
+            onDaySelected = { selectedDate = it; isMonthView = false },
+            onBackClick = { isMonthView = false })
         else -> {
             Scaffold(
                 topBar = {
                     val pageDate = LocalDate.now().plusDays((pagerState.currentPage - initialPage).toLong())
                     val fmt = DateTimeFormatter.ofPattern("d MMMM yyyy", Locale("ru"))
-                    // Игнорируем старые "пропуски" (type == 2)
                     val activeTasks = eventsList.count { it.occursOn(pageDate) && it.type != 2 }
 
                     if (isSearchActive) {
-                        SearchBarTop(query = searchQuery, onQueryChange = { searchQuery = it }, onClose = { isSearchActive = false; searchQuery = "" })
+                        TopAppBar(
+                            title = {
+                                TextField(value = searchQuery, onValueChange = { searchQuery = it },
+                                    placeholder = { Text("Поиск...") }, singleLine = true,
+                                    colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent,
+                                        unfocusedContainerColor = Color.Transparent,
+                                        focusedIndicatorColor = Color.Transparent,
+                                        unfocusedIndicatorColor = Color.Transparent)
+                                )
+                            },
+                            navigationIcon = { IconButton(onClick = { isSearchActive = false; searchQuery = "" }) { Icon(Icons.Default.ArrowBack, "Назад") } }
+                        )
                     } else {
                         CenterAlignedTopAppBar(
-                            title = { 
+                            title = {
                                 Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.pointerInput(Unit) {
-                                    detectTapGestures(onLongPress = { 
-                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                        selectedDate = LocalDate.now() 
-                                    })
+                                    detectTapGestures(onLongPress = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); selectedDate = LocalDate.now() })
                                 }) {
-                                    Text(pageDate.format(fmt), fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                                    Text("$activeTasks задач", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                                    Text(pageDate.format(fmt), fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                                    Text("$activeTasks событий", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
                                 }
                             },
                             navigationIcon = {
-                                IconButton(onClick = { isEditMode = !isEditMode; haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) }) { 
-                                    Icon(if (isEditMode) Icons.Default.Done else Icons.Default.Edit, contentDescription = "Редактировать", tint = if (isEditMode) MaterialTheme.colorScheme.primary else LocalContentColor.current) 
+                                IconButton(onClick = { isEditMode = !isEditMode }) {
+                                    Icon(if (isEditMode) Icons.Default.Done else Icons.Default.Edit, "Ред.",
+                                        tint = if (isEditMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
                                 }
                             },
                             actions = {
                                 IconButton(onClick = { isSearchActive = true }) { Icon(Icons.Default.Search, "Поиск") }
                                 IconButton(onClick = { selectedDate = pageDate; isMonthView = true }) { Icon(Icons.Default.DateRange, "Календарь") }
                                 IconButton(onClick = { isSettingsView = true }) { Icon(Icons.Default.Settings, "Настройки") }
-                            }
+                            },
+                            colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                                containerColor = MaterialTheme.colorScheme.surface
+                            )
                         )
                     }
                 }
             ) { padding ->
                 HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize().padding(padding)) { page ->
                     val pageDate = LocalDate.now().plusDays((page - initialPage).toLong())
-                    
                     var showAddDialog by remember { mutableStateOf(false) }
                     var eventToEdit by remember { mutableStateOf<DiaryEvent?>(null) }
 
-                    // Убрана тяжелая фильтрация, отсеиваем старые пропуски (type == 2)
-                    val dailyEvents = eventsList.filter { 
-                        it.occursOn(pageDate) && it.type != 2 && (searchQuery.isEmpty() || it.title.contains(searchQuery, true))
-                    }.sortedBy { it.startTime }
+                    val dailyEvents = remember(eventsList.toList(), pageDate, searchQuery) {
+                        eventsList.filter { it.occursOn(pageDate) && it.type != 2 &&
+                            (searchQuery.isEmpty() || it.title.contains(searchQuery, true))
+                        }.sortedBy { it.startTime }
+                    }
 
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(top = 16.dp, bottom = 120.dp)
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
                     ) {
-                        
+                        // Таймер до ближайшего события
                         val now = LocalDateTime.now()
-                        val upcoming = dailyEvents.firstOrNull { 
+                        val upcoming = dailyEvents.firstOrNull {
                             val tParts = it.startTime.split(":")
                             if (tParts.size < 2) return@firstOrNull false
                             val eDateTime = LocalDateTime.of(pageDate, LocalTime.of(tParts[0].toInt(), tParts[1].toInt()))
-                            val diff = ChronoUnit.SECONDS.between(now, eDateTime)
-                            diff in 1..86400
+                            ChronoUnit.SECONDS.between(now, eDateTime) in 1..86400
                         }
 
                         if (upcoming != null && pageDate == LocalDate.now() && !isEditMode && searchQuery.isEmpty()) {
-                            item { 
-                                Box(modifier = Modifier.padding(horizontal = 16.dp)) {
-                                    CountdownBlock(upcoming, pageDate) 
-                                }
-                            }
+                            item { CountdownBanner(upcoming, pageDate) }
+                            item { HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant) }
                         }
 
                         items(dailyEvents, key = { it.id }) { event ->
-                            EventCard(event, pageDate, defaultBlockColor, isDarkTheme, isEditMode) {
+                            val isPast = event.isPast(pageDate)
+                            EventCard(event, pageDate, defaultBlockColor, isDarkTheme, isPast, isEditMode) {
                                 eventToEdit = event
                                 showAddDialog = true
                             }
@@ -235,30 +348,30 @@ fun DiaryApp(dataManager: DataManager, isDarkTheme: Boolean, onThemeChange: (Boo
                             item {
                                 OutlinedButton(
                                     onClick = { eventToEdit = null; showAddDialog = true },
-                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(top = 16.dp).height(50.dp),
-                                    shape = RoundedCornerShape(12.dp)
+                                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp).height(52.dp),
+                                    shape = RoundedCornerShape(14.dp),
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.primary)
                                 ) {
-                                    Icon(Icons.Default.Add, "Добавить")
+                                    Icon(Icons.Default.Add, "Добавить", modifier = Modifier.size(22.dp))
                                     Spacer(Modifier.width(8.dp))
-                                    Text("Добавить событие")
+                                    Text("Новое событие", fontSize = 16.sp)
                                 }
                             }
+                            item { Spacer(Modifier.height(16.dp)) }
                         }
                     }
 
                     if (showAddDialog) {
-                        AddEventDialog(
-                            date = pageDate,
-                            event = eventToEdit,
+                        AddEventDialog(date = pageDate, event = eventToEdit,
                             onDismiss = { showAddDialog = false; eventToEdit = null },
                             onDelete = {
-                                eventsList.remove(eventToEdit)
-                                saveAndSync()
+                                eventToEdit?.let { cancelNotification(context, it); eventsList.remove(it); saveAndSync() }
                                 showAddDialog = false
                             },
                             onSave = { event ->
                                 eventToEdit?.let { eventsList.remove(it) }
                                 eventsList.add(event)
+                                scheduleNotification(context, event)
                                 saveAndSync()
                                 showAddDialog = false
                             }
@@ -270,23 +383,10 @@ fun DiaryApp(dataManager: DataManager, isDarkTheme: Boolean, onThemeChange: (Boo
     }
 }
 
-@Composable
-fun SearchBarTop(query: String, onQueryChange: (String) -> Unit, onClose: () -> Unit) {
-    Surface(color = MaterialTheme.colorScheme.surface, shadowElevation = 4.dp, modifier = Modifier.fillMaxWidth()) {
-        Row(modifier = Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onClose) { Icon(Icons.Default.ArrowBack, "Назад") }
-            TextField(
-                value = query, onValueChange = onQueryChange,
-                modifier = Modifier.weight(1f),
-                placeholder = { Text("Поиск событий...") },
-                colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent, focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent)
-            )
-        }
-    }
-}
+// --- БАННЕР ОБРАТНОГО ОТСЧЁТА ---
 
 @Composable
-fun CountdownBlock(event: DiaryEvent, pageDate: LocalDate) {
+fun CountdownBanner(event: DiaryEvent, pageDate: LocalDate) {
     var ticks by remember { mutableStateOf(0) }
     LaunchedEffect(Unit) { while (true) { delay(1000); ticks++ } }
 
@@ -296,119 +396,143 @@ fun CountdownBlock(event: DiaryEvent, pageDate: LocalDate) {
 
     val formattedTime = remember(ticks) {
         if (totalSeconds > 0) {
-            val hours = totalSeconds / 3600
-            val minutes = (totalSeconds % 3600) / 60
-            val seconds = totalSeconds % 60
-            String.format("%02d:%02d:%02d", hours, minutes, seconds)
+            val h = totalSeconds / 3600
+            val m = (totalSeconds % 3600) / 60
+            val s = totalSeconds % 60
+            String.format("%02d:%02d:%02d", h, m, s)
         } else "00:00:00"
     }
 
     if (totalSeconds > 0) {
         Card(
-            modifier = Modifier.fillMaxWidth().height(45.dp).padding(bottom = 8.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-            shape = RoundedCornerShape(8.dp)
+            modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(event.colorArgb).copy(alpha = 0.15f))
         ) {
-            Row(modifier = Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
-                Box(modifier = Modifier.width(6.dp).fillMaxHeight().background(Color(event.colorArgb)))
-                Spacer(modifier = Modifier.width(12.dp))
-                Icon(Icons.Default.Notifications, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(event.title, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f), maxLines = 1)
-                Text(formattedTime, modifier = Modifier.padding(end = 12.dp), color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.Schedule, "Таймер", tint = Color(event.colorArgb), modifier = Modifier.size(28.dp))
+                Spacer(Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Следующее событие", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                    Text(event.title, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Text(formattedTime, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color(event.colorArgb))
             }
         }
     }
 }
 
+// --- КАРТОЧКА СОБЫТИЯ ---
+
 @Composable
-fun EventCard(event: DiaryEvent, pageDate: LocalDate, defaultBg: Color, isDarkTheme: Boolean, isEditMode: Boolean, onEditClick: () -> Unit) {
+fun EventCard(
+    event: DiaryEvent, pageDate: LocalDate, defaultBg: Color,
+    isDarkTheme: Boolean, isPast: Boolean, isEditMode: Boolean,
+    onEditClick: () -> Unit
+) {
+    val lineColor = if (isPast) Color(event.colorArgb).copy(alpha = 0.3f) else Color(event.colorArgb)
+    val cardAlpha = if (isPast) 0.6f else 1f
     val isBreak = event.type == 1
-    val bgColor = if (isBreak) Color.Transparent else (if (isDarkTheme) Color(0xFF2C2C2C) else defaultBg)
-    
-    Row(
+
+    Card(
         modifier = Modifier
             .fillMaxWidth()
-            .drawBehind {
-                // Высокопроизводительная отрисовка тонкой вертикальной линии
-                drawLine(
-                    color = Color.Gray.copy(alpha = 0.3f),
-                    start = Offset(32.dp.toPx(), 0f),
-                    end = Offset(32.dp.toPx(), size.height),
-                    strokeWidth = 1.dp.toPx()
-                )
-            }
+            .padding(vertical = 5.dp),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isDarkTheme) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = cardAlpha)
+            else defaultBg.copy(alpha = cardAlpha)
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = if (isPast) 0.dp else 1.dp)
     ) {
-        // Метка на таймлайне (кружок)
-        Box(
-            modifier = Modifier
-                .width(64.dp)
-                .padding(top = 28.dp), // Выравниваем по центру текста заголовка
-            contentAlignment = Alignment.Center
-        ) {
-            if (!isBreak) {
-                Box(modifier = Modifier.size(12.dp).clip(CircleShape).background(Color(event.colorArgb)))
-            } else {
-                Box(modifier = Modifier.size(8.dp).clip(CircleShape).border(1.dp, Color.Gray, CircleShape).background(MaterialTheme.colorScheme.background))
-            }
-        }
+        Row(modifier = Modifier.fillMaxWidth()) {
+            // Цветная боковая линия
+            Box(
+                modifier = Modifier
+                    .width(5.dp)
+                    .fillMaxHeight()
+                    .defaultMinSize(minHeight = 70.dp)
+                    .background(lineColor, RoundedCornerShape(topStart = 14.dp, bottomStart = 14.dp))
+            )
 
-        // Карточка события
-        Card(
-            modifier = Modifier
-                .weight(1f)
-                .padding(vertical = 6.dp)
-                .padding(end = 16.dp),
-            colors = CardDefaults.cardColors(containerColor = bgColor),
-            shape = RoundedCornerShape(12.dp),
-            border = if (isBreak) BorderStroke(1.dp, Color.Gray.copy(alpha = 0.2f)) else null,
-            elevation = CardDefaults.cardElevation(defaultElevation = if (isBreak) 0.dp else 2.dp)
-        ) {
-            Column {
-                Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(14.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(modifier = Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                text = if (isBreak) "Перерыв: ${event.title}" else event.title, 
-                                fontSize = 18.sp, 
-                                fontWeight = FontWeight.Bold,
-                                color = if (isBreak) Color.Gray else Color.Unspecified
+                                text = if (isBreak) "⏸ ${event.title}" else event.title,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (isPast) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                                else MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
-                            if (event.hasNotification && !isBreak) {
-                                Icon(Icons.Default.Notifications, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(start = 6.dp).size(16.dp))
+                            if (event.hasNotification && !isBreak && !isPast) {
+                                Spacer(Modifier.width(6.dp))
+                                Icon(Icons.Default.Notifications, null,
+                                    tint = Color(event.colorArgb),
+                                    modifier = Modifier.size(16.dp))
                             }
                         }
-                        Spacer(modifier = Modifier.height(4.dp))
-                        
-                        val tStr = if (isBreak) "${event.startTime} - ${event.endTime}" else event.startTime
-                        val rStr = when(event.recurrenceType) { 1 -> " • Каждый день"; 2 -> " • Выбранные дни"; else -> "" }
-                        Text("$tStr$rStr", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+                        Spacer(Modifier.height(6.dp))
+
+                        // Время
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Schedule, "Время",
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                            Spacer(Modifier.width(4.dp))
+                            val timeStr = if (isBreak && event.endTime.isNotEmpty() && event.endTime != event.startTime)
+                                "${event.startTime} — ${event.endTime}"
+                            else event.startTime
+                            Text(timeStr, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
+
+                            val recStr = when(event.recurrenceType) {
+                                1 -> " • Ежедневно"
+                                2 -> " • По дням"
+                                else -> ""
+                            }
+                            if (recStr.isNotEmpty()) {
+                                Text(recStr, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                            }
+                        }
                     }
-                    
-                    if (isEditMode) {
-                        IconButton(onClick = onEditClick) { Icon(Icons.Default.Edit, "Изменить", tint = MaterialTheme.colorScheme.primary) }
+
+                    if (isEditMode && !isPast) {
+                        IconButton(onClick = onEditClick) {
+                            Icon(Icons.Default.Edit, "Изменить",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp))
+                        }
                     }
                 }
 
                 // Прогресс-бар для перерыва
-                if (isBreak && pageDate == LocalDate.now()) {
+                if (isBreak && pageDate == LocalDate.now() && !isPast) {
                     val sParts = event.startTime.split(":")
                     val eParts = event.endTime.split(":")
                     if (sParts.size == 2 && eParts.size == 2) {
                         val sTime = LocalTime.of(sParts[0].toInt(), sParts[1].toInt())
                         val eTime = LocalTime.of(eParts[0].toInt(), eParts[1].toInt())
                         val nowTime = LocalTime.now()
-                        
                         if (nowTime.isAfter(sTime) && nowTime.isBefore(eTime)) {
-                            val totalMins = ChronoUnit.MINUTES.between(sTime, eTime).toFloat()
-                            val passedMins = ChronoUnit.MINUTES.between(sTime, nowTime).toFloat()
-                            val progress = if (totalMins > 0) passedMins / totalMins else 0f
-                            
+                            Spacer(Modifier.height(8.dp))
+                            val progress = ChronoUnit.MINUTES.between(sTime, nowTime).toFloat() /
+                                    ChronoUnit.MINUTES.between(sTime, eTime).toFloat()
                             LinearProgressIndicator(
-                                progress = progress, 
-                                modifier = Modifier.fillMaxWidth().height(3.dp), 
-                                color = MaterialTheme.colorScheme.primary,
-                                trackColor = Color.Transparent
+                                progress = progress,
+                                modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+                                color = lineColor,
+                                trackColor = lineColor.copy(alpha = 0.1f),
                             )
                         }
                     }
@@ -418,158 +542,282 @@ fun EventCard(event: DiaryEvent, pageDate: LocalDate, defaultBg: Color, isDarkTh
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+// --- ДИАЛОГ ДОБАВЛЕНИЯ (УЛУЧШЕННЫЙ) ---
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AddEventDialog(date: LocalDate, event: DiaryEvent?, onDismiss: () -> Unit, onDelete: () -> Unit, onSave: (DiaryEvent) -> Unit) {
+fun AddEventDialog(
+    date: LocalDate, event: DiaryEvent?,
+    onDismiss: () -> Unit, onDelete: () -> Unit,
+    onSave: (DiaryEvent) -> Unit
+) {
     val ctx = LocalContext.current
     var title by remember { mutableStateOf(event?.title ?: "") }
-    var type by remember { mutableStateOf(if (event?.type == 1) 1 else 0) } // Только 0=Событие, 1=Перерыв
+    var type by remember { mutableStateOf(event?.type ?: 0) }
     var startTime by remember { mutableStateOf(event?.startTime ?: "12:00") }
     var endTime by remember { mutableStateOf(event?.endTime ?: "13:00") }
-    var selectedColor by remember { mutableStateOf(Color(event?.colorArgb ?: 0xFF2196F3.toInt())) }
+    var selectedColor by remember { mutableStateOf(Color(event?.colorArgb ?: 0xFF1976D2.toInt())) }
     var recType by remember { mutableStateOf(event?.recurrenceType ?: 0) }
     val customDays = remember { mutableStateListOf(*(event?.customDaysOfWeek?.toTypedArray() ?: emptyArray())) }
     var hasNotification by remember { mutableStateOf(event?.hasNotification ?: false) }
+    var showEndTime by remember { mutableStateOf(event?.endTime?.isNotEmpty() == true && event.endTime != event.startTime) }
 
+    val colors = listOf(
+        Color(0xFF1976D2), Color(0xFFE53935), Color(0xFF43A047),
+        Color(0xFFFB8C00), Color(0xFF8E24AA), Color(0xFF00ACC1),
+        Color(0xFFEC407A), Color(0xFF795548)
+    )
     val days = listOf("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
-    val colors = listOf(Color(0xFF2196F3), Color(0xFFF44336), Color(0xFF4CAF50), Color(0xFFFF9800), Color(0xFF9C27B0), Color(0xFF00BCD4), Color(0xFFE91E63))
 
-    fun pickTime(initial: String, onRes: (String) -> Unit) {
-        val p = initial.split(":")
-        TimePickerDialog(ctx, { _, h, m -> onRes(String.format(Locale.getDefault(), "%02d:%02d", h, m)) }, p[0].toInt(), p[1].toInt(), true).show()
+    fun pickTime(current: String, onPicked: (String) -> Unit) {
+        val parts = current.split(":")
+        TimePickerDialog(ctx, { _, h, m -> onPicked(String.format("%02d:%02d", h, m)) },
+            parts[0].toInt(), parts[1].toInt(), true).show()
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (event == null) "Новое событие" else "Изменить событие") },
+        title = {
+            Text(
+                if (event == null) "Новое событие" else "Изменить",
+                fontWeight = FontWeight.Bold
+            )
+        },
         text = {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                item { OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("Название") }, modifier = Modifier.fillMaxWidth()) }
-                
-                // Выбор типа: Только Событие и Перерыв
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        FilterChip(selected = type == 0, onClick = { type = 0 }, label = { Text("Событие") })
-                        FilterChip(selected = type == 1, onClick = { type = 1 }, label = { Text("Перерыв") })
+            Column(
+                verticalArrangement = Arrangement.spacedBy(18.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState())
+            ) {
+                // Название
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    label = { Text("Название") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp)
+                )
+
+                // Тип события
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = type == 0,
+                        onClick = { type = 0 },
+                        label = { Text("📌 Событие") },
+                        modifier = Modifier.weight(1f)
+                    )
+                    FilterChip(
+                        selected = type == 1,
+                        onClick = { type = 1 },
+                        label = { Text("⏸ Перерыв") },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                // Время начала
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Schedule, "Начало", modifier = Modifier.size(22.dp),
+                        tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Начало:", modifier = Modifier.width(65.dp), fontSize = 15.sp)
+                    TextButton(onClick = { pickTime(startTime) { startTime = it } }) {
+                        Text(startTime, fontSize = 20.sp, fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary)
                     }
                 }
 
-                // ВЫБОР ВРЕМЕНИ ВОЗВРАЩЕН
-                item {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(onClick = { pickTime(startTime) { startTime = it } }) {
-                            Text("Начало: $startTime", fontSize = 16.sp)
-                        }
+                // Время окончания (опционально)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                        checked = showEndTime,
+                        onCheckedChange = { showEndTime = it; if (!it) endTime = startTime },
+                        modifier = Modifier.padding(start = 0.dp)
+                    )
+                    Text("Время окончания", fontSize = 14.sp)
+
+                    if (showEndTime) {
+                        Spacer(Modifier.width(8.dp))
                         TextButton(onClick = { pickTime(endTime) { endTime = it } }) {
-                            Text("Конец: $endTime", fontSize = 16.sp)
+                            Text(endTime, fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary)
                         }
                     }
                 }
 
+                // Цвет (только для события)
                 if (type == 0) {
-                    item {
-                        Text("Цвет метки:", fontWeight = FontWeight.Bold)
-                        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
-                            colors.forEach { c ->
-                                Box(modifier = Modifier.size(32.dp).clip(CircleShape).background(c).border(if (selectedColor == c) 3.dp else 0.dp, MaterialTheme.colorScheme.onSurface, CircleShape).clickable { selectedColor = c })
-                            }
-                            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(32.dp).clip(CircleShape).background(Color.LightGray).clickable { 
-                                selectedColor = Color(Random.nextInt(256), Random.nextInt(256), Random.nextInt(256))
-                            }) { Icon(Icons.Default.Refresh, "Случайный цвет", tint = Color.White, modifier = Modifier.size(20.dp)) }
-                        }
-                    }
-
-                    item {
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { hasNotification = !hasNotification }) {
-                            Checkbox(checked = hasNotification, onCheckedChange = { hasNotification = it })
-                            Text("Включить уведомление")
-                            Icon(Icons.Default.Notifications, null, tint = if (hasNotification) MaterialTheme.colorScheme.primary else Color.Gray, modifier = Modifier.padding(start = 8.dp))
+                    Text("Цвет:", fontWeight = FontWeight.Medium, fontSize = 15.sp)
+                    Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                        colors.forEach { c ->
+                            Box(
+                                modifier = Modifier.size(36.dp).clip(CircleShape).background(c)
+                                    .border(if (selectedColor == c) 3.dp else 0.dp, Color.White, CircleShape)
+                                    .clickable { selectedColor = c }
+                            )
                         }
                     }
                 }
 
-                item {
-                    Text("Повторение:", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp))
-                    listOf("1 раз", "Каждый день", "Выбрать дни").forEachIndexed { i, txt ->
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable { recType = i }) {
-                            RadioButton(selected = recType == i, onClick = { recType = i })
-                            Text(txt)
-                        }
+                // Уведомление
+                if (type == 0) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { hasNotification = !hasNotification }
+                            .padding(4.dp)
+                    ) {
+                        Checkbox(checked = hasNotification, onCheckedChange = { hasNotification = it })
+                        Text("Уведомить за 5 минут", fontSize = 14.sp)
                     }
                 }
-                
-                if (recType == 2) {
-                    item {
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            days.forEachIndexed { i, d ->
-                                val dayNum = i + 1
-                                val isSel = customDays.contains(dayNum)
-                                FilterChip(selected = isSel, onClick = { if (isSel) customDays.remove(dayNum) else customDays.add(dayNum) }, label = { Text(d) })
-                            }
+
+                // Повторение
+                Text("Повторение:", fontWeight = FontWeight.Medium, fontSize = 15.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(selected = recType == 0, onClick = { recType = 0 }, label = { Text("Один раз") })
+                    FilterChip(selected = recType == 1, onClick = { recType = 1 }, label = { Text("Ежедневно") })
+                    FilterChip(selected = recType == 2, onClick = { recType = 2 }, label = { Text("По дням") })
+                }
+
+                // Дни недели
+                AnimatedVisibility(visible = recType == 2) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+                        days.forEachIndexed { i, d ->
+                            val dayNum = i + 1
+                            FilterChip(
+                                selected = customDays.contains(dayNum),
+                                onClick = { if (customDays.contains(dayNum)) customDays.remove(dayNum) else customDays.add(dayNum) },
+                                label = { Text(d, fontSize = 13.sp) },
+                                modifier = Modifier.weight(1f)
+                            )
                         }
                     }
                 }
             }
         },
-        confirmButton = { 
-            Button(onClick = { 
-                if (title.isNotBlank()) onSave(DiaryEvent(id = event?.id ?: UUID.randomUUID().toString(), title = title, date = date.toString(), type = type, startTime = startTime, endTime = endTime, colorArgb = selectedColor.toArgb(), recurrenceType = recType, customDaysOfWeek = customDays.toList(), hasNotification = hasNotification)) 
-            }) { Text("Сохранить") } 
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (title.isNotBlank()) {
+                        onSave(DiaryEvent(
+                            id = event?.id ?: UUID.randomUUID().toString(),
+                            title = title, date = date.toString(), type = type,
+                            startTime = startTime,
+                            endTime = if (showEndTime) endTime else startTime,
+                            colorArgb = selectedColor.toArgb(),
+                            recurrenceType = recType,
+                            customDaysOfWeek = customDays.toList(),
+                            hasNotification = if (type == 0) hasNotification else false
+                        ))
+                    }
+                },
+                shape = RoundedCornerShape(12.dp)
+            ) { Text("Сохранить") }
         },
-        dismissButton = { 
+        dismissButton = {
             Row {
                 if (event != null) {
-                    TextButton(onClick = onDelete, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Удалить") }
+                    TextButton(onClick = onDelete,
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                    ) { Text("Удалить") }
                 }
-                TextButton(onClick = onDismiss) { Text("Отмена") } 
+                TextButton(onClick = onDismiss) { Text("Отмена") }
             }
-        }
+        },
+        shape = RoundedCornerShape(20.dp)
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+// --- КАЛЕНДАРЬ ---
+
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
-fun MonthCalendarView(currentDate: LocalDate, allEvents: List<DiaryEvent>, onDaySelected: (LocalDate) -> Unit, onBackClick: () -> Unit) {
+fun MonthCalendarView(
+    currentDate: LocalDate, allEvents: List<DiaryEvent>,
+    onDaySelected: (LocalDate) -> Unit, onBackClick: () -> Unit
+) {
     val pageCount = 1200
     val initialPage = pageCount / 2
     val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { pageCount })
-    
+
     LaunchedEffect(Unit) {
-        val diff = ChronoUnit.MONTHS.between(YearMonth.now(), YearMonth.from(currentDate)).toInt()
-        pagerState.scrollToPage(initialPage + diff)
+        pagerState.scrollToPage(initialPage + ChronoUnit.MONTHS.between(YearMonth.now(), YearMonth.from(currentDate)).toInt())
     }
 
     Scaffold(
-        topBar = { 
+        topBar = {
             TopAppBar(
-                title = { 
+                title = {
                     val ym = YearMonth.now().plusMonths((pagerState.currentPage - initialPage).toLong())
-                    Text(ym.format(DateTimeFormatter.ofPattern("LLLL yyyy", Locale("ru"))).replaceFirstChar { it.uppercase() }) 
-                }, 
-                navigationIcon = { IconButton(onClick = onBackClick) { Icon(Icons.Default.ArrowBack, "Назад") } }
-            ) 
+                    Text(
+                        ym.format(DateTimeFormatter.ofPattern("LLLL yyyy", Locale("ru"))).replaceFirstChar { it.uppercase() },
+                        fontWeight = FontWeight.Bold
+                    )
+                },
+                navigationIcon = { IconButton(onClick = onBackClick) { Icon(Icons.Default.ArrowBack, "Назад") } },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+            )
         }
     ) { p ->
         HorizontalPager(state = pagerState, modifier = Modifier.padding(p).fillMaxSize()) { page ->
             val ym = YearMonth.now().plusMonths((page - initialPage).toLong())
-            LazyVerticalGrid(columns = GridCells.Fixed(7), modifier = Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(7),
+                modifier = Modifier.padding(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                // Заголовки дней
+                items(listOf("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")) { day ->
+                    Text(day, textAlign = TextAlign.Center, fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp, color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(vertical = 8.dp))
+                }
+                // Ячейки
                 items((1..ym.lengthOfMonth()).toList()) { d ->
                     val date = ym.atDay(d)
                     val isSel = date == currentDate
-                    // Игнорируем старые пропуски для точек
+                    val isToday = date == LocalDate.now()
                     val hasEvents = allEvents.any { it.occursOn(date) && it.type != 2 }
 
-                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable { onDaySelected(date) }) {
-                        Box(contentAlignment = Alignment.Center, modifier = Modifier.aspectRatio(1f).clip(CircleShape).background(when { isSel -> MaterialTheme.colorScheme.primary; date == LocalDate.now() -> MaterialTheme.colorScheme.secondaryContainer; else -> Color.Transparent })) {
-                            Text(d.toString(), color = if (isSel) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface)
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { onDaySelected(date) }
+                            .padding(4.dp)
+                    ) {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    when {
+                                        isSel -> MaterialTheme.colorScheme.primary
+                                        isToday -> MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+                                        else -> Color.Transparent
+                                    }
+                                )
+                                .border(
+                                    if (isToday && !isSel) 2.dp else 0.dp,
+                                    MaterialTheme.colorScheme.primary,
+                                    CircleShape
+                                )
+                        ) {
+                            Text(d.toString(),
+                                fontWeight = if (isSel || isToday) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isSel) MaterialTheme.colorScheme.onPrimary
+                                else MaterialTheme.colorScheme.onSurface,
+                                fontSize = 15.sp
+                            )
                         }
                         if (hasEvents) {
-                            Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary))
+                            Box(modifier = Modifier.size(5.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary))
                         } else {
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(Modifier.height(5.dp))
                         }
                     }
                 }
@@ -578,20 +826,92 @@ fun MonthCalendarView(currentDate: LocalDate, allEvents: List<DiaryEvent>, onDay
     }
 }
 
+// --- НАСТРОЙКИ (УЛУЧШЕННЫЕ) ---
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(isDark: Boolean, onThemeChange: (Boolean) -> Unit, defaultColor: Color, onColorChange: (Color) -> Unit, onBack: () -> Unit) {
-    Scaffold(topBar = { TopAppBar(title = { Text("Настройки") }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Назад") } }) }) { p ->
-        Column(modifier = Modifier.padding(p).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("Темная тема", fontSize = 18.sp)
-                Switch(checked = isDark, onCheckedChange = onThemeChange)
+fun SettingsScreen(
+    isDark: Boolean, onThemeChange: (Boolean) -> Unit,
+    defaultColor: Color, onColorChange: (Color) -> Unit,
+    onBack: () -> Unit
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Настройки", fontWeight = FontWeight.Bold) },
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Назад") } }
+            )
+        }
+    ) { p ->
+        Column(
+            modifier = Modifier.padding(p).padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp)
+        ) {
+            // Тема
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(20.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text("Тёмная тема", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Меняет оформление приложения", fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                    }
+                    Switch(checked = isDark, onCheckedChange = onThemeChange,
+                        colors = SwitchDefaults.colors(checkedTrackColor = MaterialTheme.colorScheme.primary))
+                }
             }
-            HorizontalDivider()
-            Text("Цвет карточек по умолчанию:", fontSize = 16.sp)
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                listOf(Color(0xFFF0F0F0), Color(0xFFFFEBEE), Color(0xFFE8F5E9), Color(0xFFE3F2FD)).forEach { c ->
-                    Box(modifier = Modifier.size(48.dp).clip(CircleShape).background(c).border(if (defaultColor == c) 2.dp else 0.dp, Color.Gray, CircleShape).clickable { onColorChange(c) })
+
+            // Цвет карточек
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Text("Цвет карточек", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(4.dp))
+                    Text("Используется для обычных событий", fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                    Spacer(Modifier.height(16.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        listOf(
+                            Color(0xFFFFFFFF), Color(0xFFFFF3E0),
+                            Color(0xFFE8F5E9), Color(0xFFE3F2FD),
+                            Color(0xFFF3E5F5), Color(0xFFFFFDE7)
+                        ).forEach { c ->
+                            Box(
+                                modifier = Modifier
+                                    .size(52.dp)
+                                    .clip(CircleShape)
+                                    .background(c)
+                                    .border(
+                                        width = if (defaultColor == c) 3.dp else 1.dp,
+                                        color = if (defaultColor == c) MaterialTheme.colorScheme.primary else Color.Gray.copy(alpha = 0.3f),
+                                        shape = CircleShape
+                                    )
+                                    .clickable { onColorChange(c) }
+                            )
+                        }
+                    }
+                }
+            }
+
+            // О приложении
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Text("О приложении", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(8.dp))
+                    Text("Офлайн Дневник v1.0", fontSize = 14.sp)
+                    Text("Планируйте события, перерывы и получайте уведомления",
+                        fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
                 }
             }
         }
