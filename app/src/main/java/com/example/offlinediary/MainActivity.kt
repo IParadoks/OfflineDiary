@@ -413,7 +413,7 @@ fun CountdownBanner(event: DiaryEvent, pageDate: LocalDate) {
                 modifier = Modifier.fillMaxWidth().padding(16.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Default.Schedule, "Таймер", tint = Color(event.colorArgb), modifier = Modifier.size(28.dp))
+                Icon(Icons.Default.DateRange, "Таймер", tint = Color(event.colorArgb), modifier = Modifier.size(28.dp))
                 Spacer(Modifier.width(14.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text("Следующее событие", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
@@ -487,7 +487,7 @@ fun EventCard(
 
                         // Время
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Schedule, "Время",
+                            Icon(Icons.Default.DateRange, "Время",
                                 modifier = Modifier.size(14.dp),
                                 tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
                             Spacer(Modifier.width(4.dp))
@@ -616,7 +616,7 @@ fun AddEventDialog(
 
                 // Время начала
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Schedule, "Начало", modifier = Modifier.size(22.dp),
+                    Icon(Icons.Default.DateRange, "Начало", modifier = Modifier.size(22.dp),
                         tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.width(10.dp))
                     Text("Начало:", modifier = Modifier.width(65.dp), fontSize = 15.sp)
